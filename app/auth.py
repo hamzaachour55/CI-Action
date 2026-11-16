@@ -10,6 +10,7 @@ from typing import Any
 
 MAX_ATTEMPTS = 3
 LOCKOUT_SECONDS = 300
+PBKDF2_ITERATIONS = 600000
 
 # username -> stored password hash
 users: dict[str, str] = {}
@@ -26,8 +27,10 @@ GENERIC_ERROR = "Identifiants incorrects"
 def _valid_username(username: Any) -> bool:
     if not isinstance(username, str):
         return False
+
     if not (3 <= len(username) <= 32):
         return False
+
     return all(ch.isalnum() or ch in "._-" for ch in username)
 
 
@@ -36,41 +39,55 @@ def _valid_password(password: Any) -> bool:
 
 
 def _hash_password(password: str) -> str:
-    """Hash password using PBKDF2 with a random salt."""
-    salt = os.urandom(16)
+    """Hash password using PBKDF2-SHA256 with a random salt."""
+
+    salt = os.urandom(16).hex()
 
     password_hash = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
-        salt,
-        600000
-    )
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS
+    ).hex()
 
-    return salt.hex() + ":" + password_hash.hex()
+    return (
+        f"pbkdf2_sha256$"
+        f"{PBKDF2_ITERATIONS}$"
+        f"{salt}$"
+        f"{password_hash}"
+    )
 
 
 def _verify_password(password: str, encoded_hash: str) -> bool:
-    """Verify password against its stored hash."""
+    """Verify password against its stored PBKDF2 hash."""
+
     try:
-        salt_hex, hash_hex = encoded_hash.split(":")
-        salt = bytes.fromhex(salt_hex)
-        expected_hash = bytes.fromhex(hash_hex)
+        algorithm, iterations, salt, expected_hash = encoded_hash.split("$")
+
+        if algorithm != "pbkdf2_sha256":
+            return False
+
+        iterations = int(iterations)
+
+        if iterations <= 0:
+            return False
 
         actual_hash = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
-            salt,
-            600000
-        )
+            salt.encode("utf-8"),
+            iterations
+        ).hex()
 
         return hmac.compare_digest(actual_hash, expected_hash)
 
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return False
 
 
 def register_user(username: Any, password: Any) -> bool:
     """Register a user. Return False for invalid or duplicate credentials."""
+
     if not _valid_username(username) or not _valid_password(password):
         return False
 
@@ -78,6 +95,7 @@ def register_user(username: Any, password: Any) -> bool:
         return False
 
     users[username] = _hash_password(password)
+
     attempts.pop(username, None)
     blocked_until.pop(username, None)
 
@@ -89,52 +107,71 @@ def authenticate(username: Any, password: Any) -> dict[str, Any]:
 
     # Reject malformed input.
     if not _valid_username(username) or not isinstance(password, str):
-        return {"success": False, "message": GENERIC_ERROR}
+        return {
+            "success": False,
+            "message": GENERIC_ERROR
+        }
 
     now = time.time()
 
-    # Check whether account is locked.
+    # Check account lockout.
     if blocked_until.get(username, 0) > now:
-        return {"success": False, "message": GENERIC_ERROR}
+        return {
+            "success": False,
+            "message": GENERIC_ERROR
+        }
 
-    # Remove expired lockout.
+    # Reset expired lockout.
     if username in blocked_until:
         blocked_until.pop(username, None)
         attempts.pop(username, None)
 
     encoded_hash = users.get(username)
 
-    # Same error message for unknown user and wrong password.
+    # Avoid revealing whether the username exists.
     if encoded_hash is None:
-        return {"success": False, "message": GENERIC_ERROR}
+        return {
+            "success": False,
+            "message": GENERIC_ERROR
+        }
 
     # Verify password.
     if not _verify_password(password, encoded_hash):
         _record_failure(username, now)
-        return {"success": False, "message": GENERIC_ERROR}
 
-    # Successful login: reset failed attempts.
+        return {
+            "success": False,
+            "message": GENERIC_ERROR
+        }
+
+    # Successful login clears previous failures.
     attempts.pop(username, None)
     blocked_until.pop(username, None)
 
-    return {"success": True, "message": "Connexion reussie"}
+    return {
+        "success": True,
+        "message": "Connexion reussie"
+    }
 
 
 def _record_failure(username: str, now: float) -> None:
+    """Record failed login and lock account after maximum attempts."""
+
     attempts[username] = attempts.get(username, 0) + 1
 
-    # Lock account after MAX_ATTEMPTS failures.
     if attempts[username] >= MAX_ATTEMPTS:
         blocked_until[username] = now + LOCKOUT_SECONDS
 
 
 def reset_attempts() -> None:
     """Clear lockout state. Intended for tests and controlled administration."""
+
     attempts.clear()
     blocked_until.clear()
 
 
 def reset_state() -> None:
     """Clear all in-memory state. Intended for isolated automated tests."""
+
     users.clear()
     reset_attempts()
