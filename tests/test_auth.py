@@ -1,3 +1,4 @@
+
 import pytest
 
 from app import auth
@@ -33,11 +34,9 @@ def test_account_is_locked_after_three_failures(monkeypatch):
     for _ in range(auth.MAX_ATTEMPTS):
         auth.authenticate("alice", "WrongPassword123!")
 
-    # Even the correct password is rejected while the account is locked.
     result = auth.authenticate("alice", "Alice123!Secure")
     assert result["success"] is False
 
-    # After the lockout period, the correct password works again.
     fake_time["now"] += auth.LOCKOUT_SECONDS + 1
     result_after_lockout = auth.authenticate("alice", "Alice123!Secure")
     assert result_after_lockout["success"] is True
@@ -87,3 +86,43 @@ def test_successful_login_clears_previous_failed_attempts():
     result = auth.authenticate("alice", "Alice123!Secure")
     assert result["success"] is True
     assert "alice" not in auth.attempts
+
+
+# ==========================================
+# PARTIE 4 - TWO NEW SECURITY TESTS
+# ==========================================
+
+def test_registration_rejects_dangerous_username():
+    # Arrange
+    auth.reset_state()
+    username = "admin'--"
+    password = "ValidPassword123!"
+
+    # Act
+    result = auth.register_user(username, password)
+
+    # Assert
+    assert result is False
+    assert username not in auth.users
+
+
+def test_locking_one_account_does_not_affect_another(monkeypatch):
+    # Arrange
+    auth.reset_state()
+
+    fake_time = {"now": 1_000_000.0}
+    monkeypatch.setattr(auth.time, "time", lambda: fake_time["now"])
+
+    auth.register_user("alice", "Alice123!Secure")
+    auth.register_user("bob", "Bob123456!Secure")
+
+    # Act: lock Alice's account
+    for _ in range(auth.MAX_ATTEMPTS):
+        auth.authenticate("alice", "WrongPassword123!")
+
+    alice_result = auth.authenticate("alice", "Alice123!Secure")
+    bob_result = auth.authenticate("bob", "Bob123456!Secure")
+
+    # Assert
+    assert alice_result["success"] is False
+    assert bob_result["success"] is True
